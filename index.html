@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aptitude & Code Solver</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        @keyframes pulse { 50% { opacity: .5; } }
+        .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .delay-75 { animation-delay: 75ms; }
+        .delay-150 { animation-delay: 150ms; }
+    </style>
+</head>
+<body class="bg-gray-900">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Main App Component
+        const App = () => {
+            const [messages, setMessages] = React.useState([
+                {
+                    id: 1,
+                    text: "Hello! I am ready to provide the most accurate answer. Please upload or take a photo of your question.",
+                    sender: 'ai',
+                    feedback: null, // null, 'correct', 'incorrect'
+                    isCorrecting: false,
+                }
+            ]);
+            const [isLoading, setIsLoading] = React.useState(false);
+            const [stream, setStream] = React.useState(null);
+            const [corrections, setCorrections] = React.useState([]); // To store learning examples
+
+            // Refs
+            const fileInputRef = React.useRef(null);
+            const videoRef = React.useRef(null);
+            const chatEndRef = React.useRef(null);
+
+            // Scroll to the bottom of the chat on new message
+            React.useEffect(() => {
+                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [messages]);
+
+            const processFiles = async (files) => {
+                for (const file of files) {
+                    if (!file.type.match('image.*')) continue;
+                    const base64ImageData = await new Promise((resolve) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                        reader.readAsDataURL(file);
+                    });
+                    await processImage(base64ImageData, file.type);
+                }
+            };
+            
+            const processImage = async (base64ImageData, mimeType) => {
+                const imageUrl = `data:${mimeType};base64,${base64ImageData}`;
+                const userMessage = { id: Date.now() + Math.random(), imageUrl, sender: 'user', base64: base64ImageData };
+                setMessages(prev => [...prev, userMessage]);
+                await processImageWithMultipleModels(base64ImageData, mimeType);
+            };
+
+            const triggerFileUpload = () => fileInputRef.current.click();
+
+            const openCamera = async () => {
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    setStream(null);
+                    return;
+                }
+                try {
+                    const videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                    setStream(videoStream);
+                } catch (error) {
+                    console.error("Error accessing camera:", error);
+                    alert("Could not access the camera. Please ensure you have given permission.");
+                }
+            };
+
+            const takePhoto = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+                
+                stream.getTracks().forEach(track => track.stop());
+                setStream(null);
+
+                const base64ImageData = canvas.toDataURL('image/jpeg').split(',')[1];
+                processImage(base64ImageData, 'image/jpeg');
+            };
+
+            const handleFeedback = (messageId, feedbackType) => {
+                setMessages(messages.map(msg => {
+                    if (msg.id === messageId) {
+                        return { ...msg, feedback: feedbackType, isCorrecting: feedbackType === 'incorrect' };
+                    }
+                    return msg;
+                }));
+            };
+
+            const handleCorrectionSubmit = (messageId, correctionText) => {
+                let originalImageBase64 = null;
+                let originalAiResponse = null;
+
+                const messageIndex = messages.findIndex(msg => msg.id === messageId);
+                if (messageIndex > 0) {
+                    const aiMessage = messages[messageIndex];
+                    originalAiResponse = aiMessage.text;
+                    // Find the user message (image) that came before the AI response
+                    for (let i = messageIndex - 1; i >= 0; i--) {
+                        if (messages[i].sender === 'user' && messages[i].base64) {
+                            originalImageBase64 = messages[i].base64;
+                            break;
+                        }
+                    }
+                }
+
+                if (originalImageBase64 && originalAiResponse) {
+                    setCorrections([...corrections, {
+                        image: originalImageBase64,
+                        wrongAnswer: originalAiResponse,
+                        correctAnswer: correctionText
+                    }]);
+                }
+
+                setMessages(messages.map(msg => 
+                    msg.id === messageId ? { ...msg, isCorrecting: false, text: `Correct answer: "${correctionText}"`, feedback: 'corrected' } : msg
+                ));
+            };
+
+            const processImageWithMultipleModels = async (base64ImageData, mimeType) => {
+                setIsLoading(true);
+
+                let learningExamples = "";
+                if (corrections.length > 0) {
+                    learningExamples = "You have made mistakes in the past. Learn from them. Here are my corrections:\n\n" +
+                    corrections.map((c, index) => 
+                        `Correction ${index + 1}:\n- For the provided image, you incorrectly answered "${c.wrongAnswer}".\n- The correct answer was "${c.correctAnswer}".\n`
+                    ).join("\n") + "\nApply this learning to the new question.\n---\n";
+                }
+
+                const advancedPrompt = `
+                    ${learningExamples}
+                    You are a world-class expert system with two stages.
+                    Stage 1 (Image Restoration): Analyze the provided image. It may be blurry, low-resolution, or have poor lighting. Your first task is to mentally de-blur and enhance it, reconstructing the clearest possible version of the text and diagrams.
+                    Stage 2 (Expert Problem-Solving): Based on your restored version of the question, act as a multi-disciplinary academic champion to solve it with rigorous, step-by-step internal reasoning.
+                    Final Output Command: Provide ONLY the single, definitive, and 100% correct final answer. Do not show your reasoning. Do not explain the restoration. Do not add any extra words. If you cannot determine the answer with extremely high confidence, respond with the single phrase: 'Unable to determine a confident answer.'
+                `;
+
+                const models = [{
+                    name: 'gemini',
+                    apiUrl: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=`,
+                    buildPayload: (prompt, data, type) => ({
+                        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: type, data: data } }] }],
+                    }),
+                    parseResponse: (res) => res.candidates?.[0]?.content?.parts?.[0]?.text.trim()
+                }];
+
+                const promises = models.map(model => {
+                    const payload = model.buildPayload(advancedPrompt, base64ImageData, mimeType);
+                    return fetch(model.apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    })
+                    .then(response => response.ok ? response.json() : Promise.reject(`API Error: ${response.status}`))
+                    .then(data => model.parseResponse(data) || null)
+                    .catch(err => { console.error(`Error with model ${model.name}:`, err); return null; });
+                });
+
+                try {
+                    const answers = await Promise.all(promises);
+                    const validAnswers = answers.filter(Boolean);
+                    
+                    let finalAnswer = "Unable to determine a confident answer.";
+                    if (validAnswers.length > 0) {
+                        const answerCounts = validAnswers.reduce((acc, answer) => {
+                            acc[answer] = (acc[answer] || 0) + 1;
+                            return acc;
+                        }, {});
+                        finalAnswer = Object.keys(answerCounts).reduce((a, b) => answerCounts[a] > answerCounts[b] ? a : b);
+                    }
+
+                    const aiMessage = { id: Date.now() + Math.random(), text: finalAnswer, sender: 'ai', feedback: null, isCorrecting: false };
+                    setMessages(prev => [...prev, aiMessage]);
+
+                } catch (error) {
+                    console.error("Error processing image with multiple models:", error);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            React.useEffect(() => {
+                if (stream && videoRef.current) videoRef.current.srcObject = stream;
+            }, [stream]);
+
+            const CorrectionInput = ({ messageId, onSubmit }) => {
+                const [text, setText] = React.useState('');
+                return (
+                    <div className="mt-2 flex gap-2">
+                        <input
+                            type="text"
+                            value={text}
+                            onChange={(e) => setText(e.target.value)}
+                            placeholder="Enter correct answer..."
+                            className="w-full bg-gray-700 border border-gray-500 rounded-md py-1 px-2 text-white focus:outline-none focus:ring-2 focus:ring-green-500"
+                        />
+                        <button onClick={() => onSubmit(messageId, text)} className="px-3 py-1 bg-green-600 text-white rounded-md font-semibold">Submit</button>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="flex flex-col h-screen bg-gray-900 text-white font-sans">
+                    {stream && (
+                        <div className="fixed inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center z-50">
+                            <video ref={videoRef} autoPlay className="w-full max-w-3xl rounded-lg"></video>
+                            <div className="flex space-x-4 mt-4">
+                                <button onClick={takePhoto} className="px-6 py-2 bg-green-600 text-white rounded-full font-bold">Take Photo</button>
+                                <button onClick={openCamera} className="px-6 py-2 bg-red-600 text-white rounded-full font-bold">Cancel</button>
+                            </div>
+                        </div>
+                    )}
+                    
+                    <header className="bg-gray-800 p-4 border-b border-gray-700 flex items-center justify-between shadow-lg">
+                        <h1 className="text-xl font-bold">Aptitude & Code Solver</h1>
+                    </header>
+
+                    <main className="flex-1 overflow-y-auto p-4 md:p-6">
+                        <div className="max-w-4xl mx-auto">
+                            {messages.map((msg) => (
+                                 <div key={msg.id} className={`flex items-start gap-4 my-6 ${msg.sender === 'user' ? 'justify-end' : ''}`}>
+                                    {msg.sender === 'ai' && <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0">G</div>}
+                                     <div className={`rounded-lg p-4 max-w-2xl ${msg.sender === 'ai' ? 'bg-gray-800' : 'bg-transparent'}`}>
+                                         <p className="whitespace-pre-wrap text-lg">{msg.text}</p>
+                                         {msg.imageUrl && <img src={msg.imageUrl} alt="User upload" className="max-w-xs md:max-w-md rounded-lg border border-gray-600 mt-2"/>}
+                                         {msg.sender === 'ai' && msg.feedback === null && (
+                                            <div className="flex items-center gap-2 mt-2">
+                                                <button onClick={() => handleFeedback(msg.id, 'correct')} className="p-1 rounded-full hover:bg-gray-700">👍</button>
+                                                <button onClick={() => handleFeedback(msg.id, 'incorrect')} className="p-1 rounded-full hover:bg-gray-700">👎</button>
+                                            </div>
+                                         )}
+                                         {msg.isCorrecting && <CorrectionInput messageId={msg.id} onSubmit={handleCorrectionSubmit} />}
+                                     </div>
+                                      {msg.sender === 'user' && <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0">U</div>}
+                                 </div>
+                            ))}
+                            {isLoading && (
+                                 <div className="flex items-start gap-4 my-6">
+                                     <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0">G</div>
+                                     <div className="rounded-lg p-4 bg-gray-800"><div className="flex items-center space-x-2"><div className="w-2 h-2 bg-white rounded-full animate-pulse"></div><div className="w-2 h-2 bg-white rounded-full animate-pulse delay-75"></div><div className="w-2 h-2 bg-white rounded-full animate-pulse delay-150"></div></div></div>
+                                 </div>
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+                    </main>
+
+                    <footer className="bg-gray-900/80 backdrop-blur-sm p-4 md:p-6 border-t border-gray-700">
+                         <div className="max-w-4xl mx-auto">
+                             <div className="relative">
+                                 <input type="file" ref={fileInputRef} onChange={(e) => processFiles(e.target.files)} className="hidden" accept="image/*" multiple/>
+                                 <div className="flex items-center bg-gray-800 border border-gray-600 rounded-full py-1 px-2">
+                                     <input type="text" placeholder="Upload or take a photo..." disabled className="w-full bg-transparent p-2 focus:outline-none"/>
+                                     <div className="flex items-center space-x-1">
+                                         <button onClick={openCamera} disabled={isLoading} className="p-2 rounded-full hover:bg-blue-600 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                                         </button>
+                                         <button onClick={triggerFileUpload} disabled={isLoading} className="p-2 rounded-full hover:bg-green-600 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.59a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                                         </button>
+                                     </div>
+                                 </div>
+                             </div>
+                         </div>
+                    </footer>
+                </div>
+            );
+        };
+
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
